@@ -11,7 +11,16 @@ from yukarin_sosoa.config import Config
 from yukarin_sosoa.dataset import create_dataset
 from yukarin_sosoa.evaluator import Evaluator
 from yukarin_sosoa.generator import Generator
-from yukarin_sosoa.model import Model, ModelOutput, reduce_result
+from yukarin_sosoa.model import (
+    DiscriminatorModelOutput,
+    GeneratorModelOutput,
+    Model,
+    reduce_result,
+)
+from yukarin_sosoa.network.discriminator import (
+    MultiPeriodDiscriminator,
+    MultiScaleDiscriminator,
+)
 from yukarin_sosoa.network.predictor import create_predictor
 from yukarin_sosoa.utility.pytorch_utility import (
     collate_list,
@@ -33,6 +42,8 @@ def train(config_yaml_path: Path, output_dir: Path):
 
     # dataset
     def _create_loader(dataset, for_train: bool, for_eval: bool):
+        if dataset is None:
+            return None
         batch_size = (
             config.train.eval_batch_size if for_eval else config.train.batch_size
         )
@@ -62,11 +73,38 @@ def train(config_yaml_path: Path, output_dir: Path):
             config.train.pretrained_predictor_path, map_location=device
         )
         predictor.load_state_dict(state_dict)
+    if config.train.pretrained_vocoder_path is not None:
+        state_dict = torch.load(
+            config.train.pretrained_vocoder_path, map_location=device
+        )
+        if "generator" in state_dict:
+            predictor.vocoder.load_state_dict(state_dict["generator"])
+        else:
+            raise ValueError(
+                "pretrained_vocoder_path state_dict does not have 'generator' key"
+            )
     print("predictor:", predictor)
 
     # model
-    predictor_scripted = torch.jit.script(predictor)
-    model = Model(model_config=config.model, predictor=predictor_scripted)
+    mpd = MultiPeriodDiscriminator(
+        initial_channel=config.network.discriminator.mpd_initial_channel
+    )
+    msd = MultiScaleDiscriminator(
+        initial_channel=config.network.discriminator.msd_initial_channel
+    )
+    if config.train.pretrained_discriminator_path is not None:
+        state_dict = torch.load(
+            config.train.pretrained_discriminator_path, map_location=device
+        )
+        if "mpd" in state_dict and "msd" in state_dict:
+            mpd.load_state_dict(state_dict["mpd"])
+            msd.load_state_dict(state_dict["msd"])
+        else:
+            raise ValueError(
+                "pretrained_discriminator_path state_dict does not have 'mpd' and 'msd' keys"
+            )
+
+    model = Model(model_config=config.model, predictor=predictor, mpd=mpd, msd=msd)
     if config.train.weight_initializer is not None:
         init_weights(model, name=config.train.weight_initializer)
     model.to(device)
@@ -74,13 +112,20 @@ def train(config_yaml_path: Path, output_dir: Path):
 
     # evaluator
     generator = Generator(
-        config=config, predictor=predictor_scripted, use_gpu=config.train.use_gpu
+        config=config, predictor=predictor, use_gpu=config.train.use_gpu
     )
     evaluator = Evaluator(generator=generator)
 
     # optimizer
-    optimizer = make_optimizer(config_dict=config.train.optimizer, model=model)
-    scaler = GradScaler(device, enabled=config.train.use_amp)
+    generator_optimizer = make_optimizer(
+        config_dict=config.train.generator_optimizer, model=predictor
+    )
+    discriminator_optimizer = make_optimizer(
+        config_dict=config.train.discriminator_optimizer,
+        model=torch.nn.ModuleList([mpd, msd]),
+    )
+    generator_scaler = GradScaler(device, enabled=config.train.use_amp)
+    discriminator_scaler = GradScaler(device, enabled=config.train.use_amp)
 
     # logger
     logger = Logger(
@@ -99,8 +144,10 @@ def train(config_yaml_path: Path, output_dir: Path):
         snapshot = torch.load(snapshot_path, map_location=device)
 
         model.load_state_dict(snapshot["model"])
-        optimizer.load_state_dict(snapshot["optimizer"])
-        scaler.load_state_dict(snapshot["scaler"])
+        generator_optimizer.load_state_dict(snapshot["generator_optimizer"])
+        discriminator_optimizer.load_state_dict(snapshot["discriminator_optimizer"])
+        generator_scaler.load_state_dict(snapshot["generator_scaler"])
+        discriminator_scaler.load_state_dict(snapshot["discriminator_scaler"])
         logger.load_state_dict(snapshot["logger"])
 
         iteration = snapshot["iteration"]
@@ -108,12 +155,19 @@ def train(config_yaml_path: Path, output_dir: Path):
         print(f"Loaded snapshot from {snapshot_path} (epoch: {epoch})")
 
     # scheduler
-    scheduler = None
-    if config.train.scheduler is not None:
-        scheduler = make_scheduler(
-            config_dict=config.train.scheduler,
-            optimizer=optimizer,
-            last_epoch=iteration,
+    generator_scheduler = None
+    if config.train.generator_scheduler is not None:
+        generator_scheduler = make_scheduler(
+            config_dict=config.train.generator_scheduler,
+            optimizer=generator_optimizer,
+            last_epoch=epoch,
+        )
+    discriminator_scheduler = None
+    if config.train.discriminator_scheduler is not None:
+        discriminator_scheduler = make_scheduler(
+            config_dict=config.train.discriminator_scheduler,
+            optimizer=discriminator_optimizer,
+            last_epoch=epoch,
         )
 
     # save
@@ -140,66 +194,116 @@ def train(config_yaml_path: Path, output_dir: Path):
 
         model.train()
 
-        train_results: list[ModelOutput] = []
+        train_generator_results: list[GeneratorModelOutput] = []
+        train_discriminator_results: list[DiscriminatorModelOutput] = []
+
         for batch in train_loader:
             iteration += 1
 
+            # Discriminatorの更新
             with autocast(device, enabled=config.train.use_amp):
                 batch = to_device(batch, device, non_blocking=True)
-                result: ModelOutput = model(batch)
+                spec1_list, spec2_list, pred_wave_list = model(batch)
 
-            loss = result["loss"]
-            if loss.isnan():
-                raise ValueError("loss is NaN")
+                discriminator_result = model.calc_discriminator(
+                    batch, pred_wave_list=pred_wave_list
+                )
+                discriminator_loss = discriminator_result["loss"]
 
-            optimizer.zero_grad()
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+            if discriminator_loss.isnan():
+                raise ValueError("discriminator loss is NaN")
 
-            if scheduler is not None:
-                scheduler.step()
+            discriminator_optimizer.zero_grad()
+            discriminator_scaler.scale(discriminator_loss).backward()
+            discriminator_scaler.step(discriminator_optimizer)
+            discriminator_scaler.update()
 
-            train_results.append(detach_cpu(result))
+            # Generatorの更新
+            with autocast(device, enabled=config.train.use_amp):
+                generator_result = model.calc_generator(
+                    batch,
+                    spec1_list=spec1_list,
+                    spec2_list=spec2_list,
+                    pred_wave_list=pred_wave_list,
+                )
+                generator_loss = generator_result["loss"]
+
+            if generator_loss.isnan():
+                raise ValueError("generator loss is NaN")
+
+            generator_optimizer.zero_grad()
+            generator_scaler.scale(generator_loss).backward()
+            generator_scaler.step(generator_optimizer)
+            generator_scaler.update()
+
+            train_generator_results.append(detach_cpu(generator_result))
+            train_discriminator_results.append(detach_cpu(discriminator_result))
+
+        if generator_scheduler is not None:
+            generator_scheduler.step()
+        if discriminator_scheduler is not None:
+            discriminator_scheduler.step()
 
         if epoch % config.train.log_epoch == 0:
             model.eval()
 
             with torch.inference_mode():
-                test_results: list[ModelOutput] = []
+                test_generator_results: list[GeneratorModelOutput] = []
+                test_discriminator_results: list[DiscriminatorModelOutput] = []
                 for batch in test_loader:
                     batch = to_device(batch, device, non_blocking=True)
-                    result = model(batch)
-                    test_results.append(detach_cpu(result))
+                    spec1_list, spec2_list, pred_wave_list = model(batch)
+                    discriminator_result = model.calc_discriminator(
+                        batch, pred_wave_list=pred_wave_list
+                    )
+                    generator_result = model.calc_generator(
+                        batch,
+                        spec1_list=spec1_list,
+                        spec2_list=spec2_list,
+                        pred_wave_list=pred_wave_list,
+                    )
+                    test_generator_results.append(detach_cpu(generator_result))
+                    test_discriminator_results.append(detach_cpu(discriminator_result))
 
                 summary = {
-                    "train": reduce_result(train_results),
-                    "test": reduce_result(test_results),
+                    "train": {
+                        "generator": reduce_result(train_generator_results),
+                        "discriminator": reduce_result(train_discriminator_results),
+                    },
+                    "test": {
+                        "generator": reduce_result(test_generator_results),
+                        "discriminator": reduce_result(test_discriminator_results),
+                    },
                     "iteration": iteration,
-                    "lr": optimizer.param_groups[0]["lr"],
+                    "lr": generator_optimizer.param_groups[0]["lr"],
+                    "lr_discriminator": discriminator_optimizer.param_groups[0]["lr"],
                 }
 
                 if epoch % config.train.eval_epoch == 0:
-                    eval_results: list[ModelOutput] = []
-                    for batch in eval_loader:
-                        batch = to_device(batch, device, non_blocking=True)
-                        result = evaluator(batch)
-                        eval_results.append(detach_cpu(result))
-                    summary["eval"] = reduce_result(eval_results)
+                    if eval_loader is not None:
+                        eval_results = []
+                        for batch in eval_loader:
+                            batch = to_device(batch, device, non_blocking=True)
+                            result = evaluator(batch)
+                            eval_results.append(detach_cpu(result))
+                        summary["eval"] = reduce_result(eval_results)
 
-                    valid_results: list[ModelOutput] = []
-                    for batch in valid_loader:
-                        batch = to_device(batch, device, non_blocking=True)
-                        result = evaluator(batch)
-                        valid_results.append(detach_cpu(result))
-                    summary["valid"] = reduce_result(valid_results)
+                    if valid_loader is not None:
+                        valid_results = []
+                        for batch in valid_loader:
+                            batch = to_device(batch, device, non_blocking=True)
+                            result = evaluator(batch)
+                            valid_results.append(detach_cpu(result))
+                        summary["valid"] = reduce_result(valid_results)
 
                     if epoch % config.train.snapshot_epoch == 0:
                         torch.save(
                             {
                                 "model": model.state_dict(),
-                                "optimizer": optimizer.state_dict(),
-                                "scaler": scaler.state_dict(),
+                                "generator_optimizer": generator_optimizer.state_dict(),
+                                "discriminator_optimizer": discriminator_optimizer.state_dict(),
+                                "generator_scaler": generator_scaler.state_dict(),
+                                "discriminator_scaler": discriminator_scaler.state_dict(),
                                 "logger": logger.state_dict(),
                                 "iteration": iteration,
                                 "epoch": epoch,
@@ -207,9 +311,12 @@ def train(config_yaml_path: Path, output_dir: Path):
                             snapshot_path,
                         )
 
-                        save_manager.save(
-                            value=summary["valid"]["value"], step=epoch, judge="min"
-                        )
+                        if "valid" in summary:
+                            save_manager.save(
+                                value=float(summary["valid"]["value"]),
+                                step=epoch,
+                                judge="min",
+                            )
 
                 logger.log(summary=summary, step=epoch)
 

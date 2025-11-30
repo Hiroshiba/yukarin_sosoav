@@ -15,8 +15,8 @@ from torch.utils.data._utils.collate import default_convert
 from .config import DatasetConfig
 from .data.phoneme import OjtPhoneme
 from .data.sampling_data import SamplingData
+from .data.wave import Wave
 from .utility.dataset_utility import CachePath
-
 
 mora_phoneme_list = ["a", "i", "u", "e", "o", "A", "I", "U", "E", "O", "N", "cl", "pau"]
 voiced_phoneme_list = (
@@ -34,6 +34,7 @@ class DatasetInput:
     silence: SamplingData
     phoneme_list: list[OjtPhoneme] | None
     volume: SamplingData | None
+    wave: Wave
 
 
 @dataclass
@@ -44,6 +45,7 @@ class LazyDatasetInput:
     silence_path: PathLike
     phoneme_list_path: PathLike | None
     volume_path: PathLike | None
+    wave_path: PathLike
 
     def generate(self):
         return DatasetInput(
@@ -61,6 +63,7 @@ class LazyDatasetInput:
                 if self.volume_path is not None
                 else None
             ),
+            wave=Wave.load(Path(self.wave_path)),
         )
 
 
@@ -69,6 +72,9 @@ class DatasetOutput(TypedDict):
     phoneme: Tensor
     spec: Tensor
     speaker_id: Tensor | None
+    wave: Tensor
+    framed_wave: Tensor
+    wave_start_frame: Tensor
 
 
 class F0ProcessMode(str, Enum):
@@ -117,6 +123,7 @@ def preprocess(
     d: DatasetInput,
     prepost_silence_length: int,
     max_sampling_length: int,
+    wave_frame_length: int,
     f0_process_mode: F0ProcessMode,
     time_mask_max_second: float,
     time_mask_rate: float,
@@ -128,13 +135,27 @@ def preprocess(
     silence = d.silence.resample(rate)
     volume = d.volume.resample(rate) if d.volume is not None else None
     spec = d.spec.array
+    wave = d.wave.wave
+    wave_rate = float(d.wave.sampling_rate)
+
+    frame_rate = float(rate)
+    if wave_rate % frame_rate != 0:
+        raise ValueError(
+            f"wave_rate ({wave_rate}) must be an integer multiple of frame_rate ({frame_rate})"
+        )
+
+    frame_size = int(wave_rate / frame_rate)
+    trimmed_wave_length = (len(wave) // frame_size) * frame_size
+    wave = wave[:trimmed_wave_length]
+    framed_wave = wave.reshape(-1, frame_size)
 
     assert numpy.abs(len(spec) - len(f0)) < 5
     assert numpy.abs(len(spec) - len(phoneme)) < 5
     assert numpy.abs(len(spec) - len(silence)) < 5
     assert volume is None or numpy.abs(len(spec) - len(silence)) < 5
+    assert numpy.abs(len(spec) - len(framed_wave)) < 5
 
-    length = min(len(spec), len(f0), len(phoneme), len(silence))
+    length = min(len(spec), len(f0), len(phoneme), len(silence), len(framed_wave))
     if volume is not None:
         length = min(length, len(volume))
 
@@ -147,6 +168,7 @@ def preprocess(
     silence = silence[notsilence_range]
     phoneme = phoneme[notsilence_range]
     spec = spec[notsilence_range]
+    framed_wave = framed_wave[notsilence_range]
     if volume is not None:
         volume = volume[notsilence_range]
     length = len(f0)
@@ -159,6 +181,7 @@ def preprocess(
         silence = silence[offset_slice]
         phoneme = phoneme[offset_slice]
         spec = spec[offset_slice]
+        framed_wave = framed_wave[offset_slice]
         if volume is not None:
             volume = volume[offset_slice]
         length = max_sampling_length
@@ -207,11 +230,38 @@ def preprocess(
             f0[mask_offset : mask_offset + mask_length] = 0
             phoneme[mask_offset : mask_offset + mask_length] = 0
 
+    # 波形セグメントの切り出し
+    if length >= wave_frame_length:
+        wave_start_frame = numpy.random.randint(length - wave_frame_length + 1)
+        framed_wave = framed_wave[
+            wave_start_frame : wave_start_frame + wave_frame_length
+        ]
+    else:
+        wave_start_frame = 0
+        pad_length = wave_frame_length - length
+
+        spec_padding = numpy.zeros((pad_length, spec.shape[1]), dtype=spec.dtype)
+        spec = numpy.concatenate([spec, spec_padding], axis=0)
+
+        f0_padding = numpy.zeros(pad_length, dtype=f0.dtype)
+        f0 = numpy.concatenate([f0, f0_padding], axis=0)
+
+        phoneme_padding = numpy.zeros(pad_length, dtype=phoneme.dtype)
+        phoneme = numpy.concatenate([phoneme, phoneme_padding], axis=0)
+
+        wave_padding = numpy.zeros(
+            (pad_length, framed_wave.shape[1]), dtype=framed_wave.dtype
+        )
+        framed_wave = numpy.concatenate([framed_wave, wave_padding], axis=0)
+
     output_data = DatasetOutput(
         f0=torch.from_numpy(f0).float(),
         phoneme=torch.from_numpy(phoneme).float(),
         spec=torch.from_numpy(spec).float(),
         speaker_id=None,
+        wave=torch.from_numpy(wave).float(),
+        framed_wave=torch.from_numpy(framed_wave).float(),
+        wave_start_frame=torch.tensor(wave_start_frame).long(),
     )
     return output_data
 
@@ -222,6 +272,7 @@ class FeatureTargetDataset(Dataset):
         datas: list[DatasetInput | LazyDatasetInput],
         prepost_silence_length: int,
         max_sampling_length: int,
+        wave_frame_length: int,
         f0_process_mode: F0ProcessMode,
         time_mask_max_second: float,
         time_mask_rate: float,
@@ -231,6 +282,7 @@ class FeatureTargetDataset(Dataset):
             preprocess,
             prepost_silence_length=prepost_silence_length,
             max_sampling_length=max_sampling_length,
+            wave_frame_length=wave_frame_length,
             f0_process_mode=f0_process_mode,
             time_mask_max_second=time_mask_max_second,
             time_mask_rate=time_mask_rate,
@@ -321,6 +373,9 @@ def create_dataset(config: DatasetConfig):
     silence_paths = _load_pathlist(config.silence_pathlist_path, config.root_dir)
     assert set(fn_list) == set(silence_paths.keys())
 
+    wave_paths = _load_pathlist(config.wave_pathlist_path, config.root_dir)
+    assert set(fn_list) == set(wave_paths.keys())
+
     phoneme_list_paths: dict[str, Path] | None = None
     if config.phoneme_list_pathlist_path is not None:
         phoneme_list_paths = _load_pathlist(
@@ -370,6 +425,7 @@ def create_dataset(config: DatasetConfig):
                 volume_path=(
                     CachePath(volume_paths[fn]) if volume_paths is not None else None
                 ),
+                wave_path=CachePath(wave_paths[fn]),
             )
             for fn in fns
         ]
@@ -378,6 +434,7 @@ def create_dataset(config: DatasetConfig):
             datas=inputs,
             prepost_silence_length=config.prepost_silence_length,
             max_sampling_length=config.max_sampling_length,
+            wave_frame_length=config.wave_frame_length,
             f0_process_mode=F0ProcessMode(config.f0_process_mode),
             time_mask_max_second=(config.time_mask_max_second if not for_eval else 0),
             time_mask_rate=(config.time_mask_rate if not for_eval else 0),
@@ -436,6 +493,12 @@ def create_validation_dataset(config: DatasetConfig):
     silence_paths = _load_pathlist(config.valid_silence_pathlist_path, config.root_dir)
     assert set(fn_list) == set(silence_paths.keys())
 
+    if config.valid_wave_pathlist_path is not None:
+        wave_paths = _load_pathlist(config.valid_wave_pathlist_path, config.root_dir)
+    else:
+        wave_paths = _load_pathlist(config.wave_pathlist_path, config.root_dir)
+    assert set(fn_list) == set(wave_paths.keys())
+
     phoneme_list_paths: dict[str, Path] | None = None
     if config.valid_phoneme_list_pathlist_path is not None:
         phoneme_list_paths = _load_pathlist(
@@ -483,6 +546,7 @@ def create_validation_dataset(config: DatasetConfig):
             volume_path=(
                 CachePath(volume_paths[fn]) if volume_paths is not None else None
             ),
+            wave_path=CachePath(wave_paths[fn]),
         )
         for fn in valids
     ]
@@ -491,6 +555,7 @@ def create_validation_dataset(config: DatasetConfig):
         datas=inputs,
         prepost_silence_length=config.prepost_silence_length,
         max_sampling_length=config.max_sampling_length,
+        wave_frame_length=config.wave_frame_length,
         f0_process_mode=F0ProcessMode(config.f0_process_mode),
         time_mask_max_second=0,
         time_mask_rate=0,

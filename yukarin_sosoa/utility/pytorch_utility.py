@@ -92,6 +92,10 @@ def make_scheduler(config_dict: Dict[str, Any], optimizer: Optimizer, last_epoch
         scheduler = optim.lr_scheduler.StepLR(optimizer, last_epoch=last_epoch, **cp)
     elif n == "warmup":
         scheduler = WarmupLR(optimizer, last_epoch=last_epoch, **cp)
+    elif n == "exponential":
+        scheduler = optim.lr_scheduler.ExponentialLR(
+            optimizer, last_epoch=last_epoch, **cp
+        )
     else:
         raise ValueError(n)
 

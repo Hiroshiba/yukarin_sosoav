@@ -12,6 +12,7 @@ from .network.predictor import Predictor, create_predictor
 
 class GeneratorOutput(TypedDict):
     spec: Tensor
+    wave: Tensor
 
 
 def to_tensor(array: Tensor | numpy.ndarray | Any):
@@ -52,9 +53,21 @@ class Generator(nn.Module):
         if speaker_id is not None:
             speaker_id = to_tensor(speaker_id).to(self.device)
 
+        batch_size = len(f0_list)
+        if speaker_id is None:
+            device = f0_list[0].device
+            speaker_id_tensor = torch.zeros(batch_size, dtype=torch.long, device=device)
+        else:
+            speaker_id_tensor = to_tensor(speaker_id).to(f0_list[0].device).long()
+
         with torch.inference_mode():
-            _, output_list = self.predictor(
-                f0_list=f0_list, phoneme_list=phoneme_list, speaker_id=speaker_id
+            _, spec_list, wave_list = self.predictor(
+                f0_list=f0_list,
+                phoneme_list=phoneme_list,
+                speaker_id=speaker_id_tensor,
             )
 
-        return [GeneratorOutput(spec=output) for output in output_list]
+        return [
+            GeneratorOutput(spec=spec, wave=wave)
+            for spec, wave in zip(spec_list, wave_list, strict=True)
+        ]

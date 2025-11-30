@@ -123,6 +123,7 @@ def generate(
         data = preprocess(
             d=input_data,
             max_sampling_length=99999999,
+            wave_frame_length=config.dataset.wave_frame_length,
             prepost_silence_length=99999999,
             f0_process_mode=F0ProcessMode(config.dataset.f0_process_mode),
             time_mask_max_second=0,

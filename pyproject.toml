@@ -1,5 +1,5 @@
 [project]
-name = "yukarin_sosoa"
+name = "yukarin_sosoav"
 version = "0.1.0"
 requires-python = "~=3.10"
 dependencies = [
@@ -27,4 +27,4 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["yukarin_sosoa*"]
+include = ["yukarin_sosoav*"]

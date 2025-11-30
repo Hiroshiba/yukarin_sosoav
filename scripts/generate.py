@@ -16,15 +16,15 @@ from torch.utils.data.dataset import ConcatDataset
 from tqdm import tqdm
 
 from utility.save_arguments import save_arguments
-from yukarin_sosoa.config import Config
-from yukarin_sosoa.dataset import (
+from yukarin_sosoav.config import Config
+from yukarin_sosoav.dataset import (
     F0ProcessMode,
     FeatureTargetDataset,
     SpeakerFeatureDataset,
     create_dataset,
     preprocess,
 )
-from yukarin_sosoa.generator import Generator, GeneratorOutput
+from yukarin_sosoav.generator import Generator, GeneratorOutput
 
 
 def _extract_number(f):

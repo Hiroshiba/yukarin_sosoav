@@ -246,7 +246,9 @@ def preprocess(
         f0_padding = numpy.zeros(pad_length, dtype=f0.dtype)
         f0 = numpy.concatenate([f0, f0_padding], axis=0)
 
-        phoneme_padding = numpy.zeros(pad_length, dtype=phoneme.dtype)
+        phoneme_padding = numpy.zeros(
+            (pad_length, phoneme.shape[1]), dtype=phoneme.dtype
+        )
         phoneme = numpy.concatenate([phoneme, phoneme_padding], axis=0)
 
         wave_padding = numpy.zeros(

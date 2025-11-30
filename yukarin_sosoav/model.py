@@ -4,7 +4,7 @@ import torch
 from torch import Tensor, nn
 from torch.nn.functional import l1_loss
 
-from yukarin_sosoa.dataset import DatasetOutput
+from yukarin_sosoav.dataset import DatasetOutput
 
 from .config import ModelConfig
 from .network.discriminator import MultiPeriodDiscriminator, MultiScaleDiscriminator

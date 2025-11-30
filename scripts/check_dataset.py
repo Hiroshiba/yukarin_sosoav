@@ -9,9 +9,9 @@ import yaml
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from yukarin_sosoa.config import Config
-from yukarin_sosoa.dataset import create_dataset
-from yukarin_sosoa.utility.pytorch_utility import collate_list
+from yukarin_sosoav.config import Config
+from yukarin_sosoav.dataset import create_dataset
+from yukarin_sosoav.utility.pytorch_utility import collate_list
 
 
 def _wrapper(index, dataset):

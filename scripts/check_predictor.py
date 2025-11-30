@@ -4,8 +4,8 @@ from pathlib import Path
 import torch
 import yaml
 
-from yukarin_sosoa.config import Config
-from yukarin_sosoa.network.predictor import create_predictor
+from yukarin_sosoav.config import Config
+from yukarin_sosoav.network.predictor import create_predictor
 
 
 def check_predictor(config_yaml_path: Path):

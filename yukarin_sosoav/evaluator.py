@@ -3,7 +3,7 @@ from typing import TypedDict
 import torch
 from torch import Tensor, nn
 
-from yukarin_sosoa.dataset import DatasetOutput
+from yukarin_sosoav.dataset import DatasetOutput
 
 from .generator import Generator, GeneratorOutput
 from .utility.audio_utility import log_mel_spectrogram

@@ -1506,7 +1506,7 @@ wheels = [
 ]
 
 [[package]]
-name = "yukarin-sosoa"
+name = "yukarin-sosoav"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

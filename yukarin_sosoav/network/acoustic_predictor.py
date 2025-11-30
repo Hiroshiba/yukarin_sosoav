@@ -81,7 +81,7 @@ class AcousticPredictor(nn.Module):
         self.output_size = output_size
 
         self.phoneme_embedder = nn.Sequential(
-            nn.Embedding(phoneme_size, phoneme_embedding_size),
+            nn.Linear(phoneme_size, phoneme_embedding_size),
             nn.Linear(phoneme_embedding_size, phoneme_embedding_size),
             nn.Linear(phoneme_embedding_size, phoneme_embedding_size),
             nn.Linear(phoneme_embedding_size, phoneme_embedding_size),
@@ -117,7 +117,7 @@ class AcousticPredictor(nn.Module):
         self,
         *,
         f0: Tensor,  # (B, fL)
-        phoneme: Tensor,  # (B, fL)
+        phoneme: Tensor,  # (B, fL, ?)
         length: Tensor,  # (B,)
         speaker_id: Tensor,  # (B,)
     ) -> tuple[Tensor, Tensor]:
@@ -125,7 +125,7 @@ class AcousticPredictor(nn.Module):
         batch_size = f0.size(0)
 
         h_phoneme = self.phoneme_embedder(phoneme)
-        h_f0 = self.f0_linear(f0.unsqueeze(-1))
+        h_f0 = self.f0_linear(f0)
 
         h_speaker = self.speaker_embedder(speaker_id)
         h_speaker = h_speaker.unsqueeze(1).expand(batch_size, f0.size(1), -1)
@@ -143,7 +143,7 @@ class AcousticPredictor(nn.Module):
         self,
         *,
         f0_list: list[Tensor],  # [(fL,)]
-        phoneme_list: list[Tensor],  # [(fL,)]
+        phoneme_list: list[Tensor],  # [(fL, ?)]
         speaker_id: Tensor,  # (B,)
     ) -> tuple[list[Tensor], list[Tensor]]:
         device = f0_list[0].device
@@ -152,12 +152,10 @@ class AcousticPredictor(nn.Module):
         f0 = pad_sequence(f0_list, batch_first=True)
         phoneme = pad_sequence(phoneme_list, batch_first=True)
 
-        speaker_id = speaker_id.to(device)
-
-        spec1, spec2 = self.forward(
+        spec1, spec2 = self(
             f0=f0,
             phoneme=phoneme,
-            length=length.long(),
+            length=length,
             speaker_id=speaker_id,
         )
 

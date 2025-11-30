@@ -7,22 +7,22 @@ from torch.amp.autocast_mode import autocast
 from torch.amp.grad_scaler import GradScaler
 from torch.utils.data import DataLoader
 
-from yukarin_sosoa.config import Config
-from yukarin_sosoa.dataset import create_dataset
-from yukarin_sosoa.evaluator import Evaluator
-from yukarin_sosoa.generator import Generator
-from yukarin_sosoa.model import (
+from yukarin_sosoav.config import Config
+from yukarin_sosoav.dataset import create_dataset
+from yukarin_sosoav.evaluator import Evaluator
+from yukarin_sosoav.generator import Generator
+from yukarin_sosoav.model import (
     DiscriminatorModelOutput,
     GeneratorModelOutput,
     Model,
     reduce_result,
 )
-from yukarin_sosoa.network.discriminator import (
+from yukarin_sosoav.network.discriminator import (
     MultiPeriodDiscriminator,
     MultiScaleDiscriminator,
 )
-from yukarin_sosoa.network.predictor import create_predictor
-from yukarin_sosoa.utility.pytorch_utility import (
+from yukarin_sosoav.network.predictor import create_predictor
+from yukarin_sosoav.utility.pytorch_utility import (
     collate_list,
     detach_cpu,
     init_weights,
@@ -30,7 +30,7 @@ from yukarin_sosoa.utility.pytorch_utility import (
     make_scheduler,
     to_device,
 )
-from yukarin_sosoa.utility.train_utility import Logger, SaveManager
+from yukarin_sosoav.utility.train_utility import Logger, SaveManager
 
 
 def train(config_yaml_path: Path, output_dir: Path):

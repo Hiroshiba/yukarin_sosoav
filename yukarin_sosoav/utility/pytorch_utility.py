@@ -54,6 +54,8 @@ def make_optimizer(config_dict: Dict[str, Any], model: nn.Module):
         optimizer = torch_optimizer.Ranger(model.parameters(), **cp)
     elif n == "sgd":
         optimizer = optim.SGD(model.parameters(), **cp)
+    elif n == "adamw":
+        optimizer = optim.AdamW(model.parameters(), **cp)
     elif n == "true_adamw":
         cp["weight_decay"] /= cp["lr"]
         optimizer = optim.AdamW(model.parameters(), **cp)
@@ -90,12 +92,12 @@ def make_scheduler(config_dict: Dict[str, Any], optimizer: Optimizer, last_epoch
     scheduler: optim.lr_scheduler._LRScheduler
     if n == "step":
         scheduler = optim.lr_scheduler.StepLR(optimizer, last_epoch=last_epoch, **cp)
-    elif n == "warmup":
-        scheduler = WarmupLR(optimizer, last_epoch=last_epoch, **cp)
     elif n == "exponential":
         scheduler = optim.lr_scheduler.ExponentialLR(
             optimizer, last_epoch=last_epoch, **cp
         )
+    elif n == "warmup":
+        scheduler = WarmupLR(optimizer, last_epoch=last_epoch, **cp)
     else:
         raise ValueError(n)
 

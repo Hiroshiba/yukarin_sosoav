@@ -55,7 +55,7 @@ def train(config_yaml_path: Path, output_dir: Path):
             collate_fn=collate_list,
             pin_memory=config.train.use_gpu,
             drop_last=for_train,
-            timeout=0 if config.train.num_processes == 0 else 30,
+            timeout=0 if config.train.num_processes == 0 else 90,
             persistent_workers=config.train.num_processes > 0,
         )
 
